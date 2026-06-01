@@ -1,0 +1,35 @@
+{
+  "name": "hgv-druckerclient",
+  "version": "1.0.0",
+  "description": "HGV Bestellsystem – Druckerclient für Windows",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "dev": "electron . --dev",
+    "build": "electron-builder --win"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.39.0",
+    "electron": "^28.2.0"
+  },
+  "devDependencies": {
+    "electron-builder": "^24.9.1"
+  },
+  "build": {
+    "appId": "at.hgv.druckerclient",
+    "productName": "HGV Druckerclient",
+    "win": {
+      "target": "nsis",
+      "icon": "assets/icon.ico"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    },
+    "files": [
+      "**/*",
+      "!node_modules/.cache",
+      "!**/*.map"
+    ]
+  }
+}
