@@ -285,30 +285,26 @@ function buildEscPosBuffer(order, barName = '') {
   const storno = isStorno(order)
   const total  = order.items.reduce((sum, i) => sum + i.price * i.quantity, 0)
   const W      = 42   // Zeichen pro Zeile (Normalgröße, 80 mm Papier)
-  // Mit doppelter Breite (DBL_HW) passen nur 21 Zeichen pro Zeile
 
   // ── ESC/POS-Befehle ────────────────────────────────────────────────────────
   const CMD = {
-    INIT:         Buffer.from([ESC, 0x40]),
-    CHARSET_858:  Buffer.from([ESC, 0x74, 0x10]),  // PC858 – ä ö ü ß nativ
-    ALIGN_CENTER: Buffer.from([ESC, 0x61, 0x01]),
-    ALIGN_LEFT:   Buffer.from([ESC, 0x61, 0x00]),
-    BOLD_ON:      Buffer.from([ESC, 0x45, 0x01]),
-    BOLD_OFF:     Buffer.from([ESC, 0x45, 0x00]),
-    DBL_HW:       Buffer.from([GS,  0x21, 0x11]),  // 2× Höhe + Breite (21 Zeichen/Zeile)
-    DBL_H:        Buffer.from([GS,  0x21, 0x01]),  // nur 2× Höhe       (42 Zeichen/Zeile)
-    NORMAL:       Buffer.from([GS,  0x21, 0x00]),
-    REV_ON:       Buffer.from([GS,  0x42, 0x01]),  // Weiß-auf-Schwarz (invertiert)
-    REV_OFF:      Buffer.from([GS,  0x42, 0x00]),
-    CUT:          Buffer.from([GS,  0x56, 0x42, 0x05]),  // Partial-Cut + Feed
-    LF:           Buffer.from([0x0a]),
+    INIT:        Buffer.from([ESC, 0x40]),
+    CHARSET_858: Buffer.from([ESC, 0x74, 0x10]),  // PC858 – ä ö ü ß nativ
+    ALIGN_LEFT:  Buffer.from([ESC, 0x61, 0x00]),
+    BOLD_ON:     Buffer.from([ESC, 0x45, 0x01]),
+    BOLD_OFF:    Buffer.from([ESC, 0x45, 0x00]),
+    DBL_H:       Buffer.from([GS,  0x21, 0x01]),  // 2× Höhe (Breite bleibt 42 Z.)
+    NORMAL:      Buffer.from([GS,  0x21, 0x00]),
+    CUT:         Buffer.from([GS,  0x56, 0x42, 0x05]),
+    LF:          Buffer.from([0x0a]),
   }
 
+  // Zeile als latin1-Buffer
   function ln(text = '') {
     return Buffer.from(String(text) + '\n', 'latin1')
   }
 
-  // Links- und rechtsbündiger Text auf `width` Zeichen
+  // Zwei Spalten: links + rechts, dazwischen Leerzeichen bis W Zeichen
   function pad(left, right, width = W) {
     left  = String(left)
     right = String(right)
@@ -316,17 +312,38 @@ function buildEscPosBuffer(order, barName = '') {
     return Buffer.from(left + ' '.repeat(spaces) + right + '\n', 'latin1')
   }
 
+  // Drei Spalten gleichmäßig verteilt auf W Zeichen
+  function threeCol(left, center, right, width = W) {
+    left   = String(left)
+    center = String(center)
+    right  = String(right)
+    const spare = Math.max(2, width - left.length - center.length - right.length)
+    const g1 = Math.ceil(spare / 2)
+    const g2 = spare - g1
+    return Buffer.from(
+      left + ' '.repeat(g1) + center + ' '.repeat(g2) + right + '\n',
+      'latin1'
+    )
+  }
+
+  // Trennlinie
   function sep(ch = '=') {
     return Buffer.from(ch.repeat(W) + '\n', 'latin1')
   }
 
-  // ── Header: Tisch (links, groß) + Uhrzeit (rechts) ────────────────────────
+  // ── Header: Tisch | Bar | Zeit – alle drei auf einer Zeile ────────────────
+  const venue = String(barName || 'HGV').toUpperCase()
+  const header = storno
+    ? threeCol(`Tisch ${order.table ?? '-'}`, venue, formatTime(now))
+    : threeCol(`Tisch ${order.table ?? '-'}`, venue, formatTime(now))
+
   const chunks = [
     CMD.INIT,
     CMD.CHARSET_858,
+    CMD.ALIGN_LEFT,
     CMD.BOLD_ON,
     CMD.DBL_H,
-    pad(`Tisch ${order.table ?? '-'}`, formatTime(now)),
+    header,
     CMD.NORMAL,
     CMD.BOLD_OFF,
     sep('='),
@@ -336,62 +353,53 @@ function buildEscPosBuffer(order, barName = '') {
   if (storno) {
     chunks.push(
       CMD.LF,
-      CMD.ALIGN_CENTER,
       CMD.BOLD_ON,
-      CMD.REV_ON,
-      Buffer.from('***  S T O R N O  ***'.padEnd(W) + '\n', 'latin1'),
-      CMD.REV_OFF,
+      ln('*** STORNO ***'),
       CMD.BOLD_OFF,
-      CMD.ALIGN_LEFT,
     )
   }
 
   // ── Artikel ────────────────────────────────────────────────────────────────
-  for (const item of order.items) {
-    // Menge: zentriert, doppelte Höhe+Breite → max. 21 Zeichen
-    const qtyText = storno ? `-${item.quantity} X` : `${item.quantity} X`
+  // Doppelte Höhe → 42 Zeichen Breite bleibt, Text wirkt größer & besser lesbar
+  // Abstand nach Header: eine Leerzeile
+  chunks.push(CMD.LF)
+
+  for (let i = 0; i < order.items.length; i++) {
+    const item  = order.items[i]
+    const qty   = storno ? `-${item.quantity}x` : `${item.quantity}x`
+    const price = storno
+      ? `-${formatPrice(item.price * item.quantity)}`
+      : formatPrice(item.price * item.quantity)
+
+    // Mit DBL_H bleibt die Zeilenbreite 42 Zeichen
+    const nameMax = W - qty.length - 3 - 1 - price.length
+    const name = String(item.name).substring(0, nameMax).padEnd(nameMax)
+
     chunks.push(
-      CMD.LF,
-      CMD.ALIGN_CENTER,
-      CMD.DBL_HW,
-      CMD.BOLD_ON,
-      ln(qtyText),
+      CMD.DBL_H,
+      Buffer.from(`${qty}   ${name} ${price}\n`, 'latin1'),
       CMD.NORMAL,
-      CMD.BOLD_OFF,
-      CMD.ALIGN_LEFT,
     )
 
-    // Produktname: invertiert (weiß auf schwarz), auf volle Breite aufgefüllt
-    const name = String(item.name).substring(0, W).padEnd(W)
-    chunks.push(
-      CMD.BOLD_ON,
-      CMD.REV_ON,
-      Buffer.from(name + '\n', 'latin1'),
-      CMD.REV_OFF,
-      CMD.BOLD_OFF,
-    )
-
-    // Notiz: normal, leicht eingerückt
     if (item.note) {
-      chunks.push(ln(`  ${item.note}`))
+      // Notiz in Normalgröße, leicht eingerückt
+      chunks.push(Buffer.from(`     -> ${item.note}\n`, 'latin1'))
     }
+
+    // Abstand zwischen Artikeln
+    chunks.push(CMD.LF)
   }
 
   // ── Gesamt ─────────────────────────────────────────────────────────────────
-  const totalValue = storno
-    ? `-${formatPrice(total)}`
-    : formatPrice(total)
   const totalLabel = storno ? 'STORNO' : 'GESAMT'
+  const totalValue = storno ? `-${formatPrice(total)}` : formatPrice(total)
 
   chunks.push(
-    CMD.LF,
     sep('='),
     CMD.BOLD_ON,
-    CMD.DBL_H,
     pad(totalLabel, totalValue),
-    CMD.NORMAL,
     CMD.BOLD_OFF,
-    sep('='),
+    sep('-'),
   )
 
   // ── Gesamtnotiz ────────────────────────────────────────────────────────────
@@ -399,17 +407,13 @@ function buildEscPosBuffer(order, barName = '') {
     chunks.push(CMD.LF, ln(`Notiz: ${order.note}`))
   }
 
-  // ── Footer: Kellner · Bon-Nr · Datum ──────────────────────────────────────
-  // Drei Spalten auf einer Zeile: "Kellner     #42     01.06.2026"
-  const fl = String(order.waiter_name || '-')
-  const fm = `#${order.order_id}`
-  const fr = now.toLocaleDateString('de-DE')
-  const gap1 = Math.max(1, Math.floor((W - fl.length - fm.length - fr.length) / 2))
-  const gap2 = Math.max(1, W - fl.length - fm.length - fr.length - gap1)
-  const footerLine = fl + ' '.repeat(gap1) + fm + ' '.repeat(gap2) + fr
-
+  // ── Footer: Kellner | #Bon-Nr | Datum ─────────────────────────────────────
   chunks.push(
-    Buffer.from(footerLine.substring(0, W) + '\n', 'latin1'),
+    threeCol(
+      order.waiter_name || '-',
+      `#${order.order_id}`,
+      now.toLocaleDateString('de-DE'),
+    ),
     Buffer.from('\n\n\n'),
     CMD.CUT,
   )
