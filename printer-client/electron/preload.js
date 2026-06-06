@@ -27,6 +27,10 @@ contextBridge.exposeInMainWorld('electron', {
     ipcRenderer.invoke('print-order', { order, config }),
   testPrint: (config) => ipcRenderer.invoke('test-print', config),
 
+  // ── Layout Import/Export ────────────────────────────────────────────────
+  exportLayout: (layout) => ipcRenderer.invoke('export-layout', layout),
+  importLayout: () => ipcRenderer.invoke('import-layout'),
+
   // ── Benachrichtigungen ───────────────────────────────────────────────────
   showNotification: (title, body) =>
     ipcRenderer.invoke('show-notification', { title, body }),

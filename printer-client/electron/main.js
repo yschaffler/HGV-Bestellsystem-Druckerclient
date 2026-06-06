@@ -7,6 +7,7 @@ const {
   Notification,
   nativeImage,
   shell,
+  dialog,
 } = require('electron')
 const path = require('path')
 const fs = require('fs')
@@ -444,6 +445,41 @@ $gc.Free()
     return { success: true }
   } catch (e) {
     console.error('[test-print] Fehler:', e)
+    return { success: false, error: e.message }
+  }
+})
+
+// Layout exportieren
+ipcMain.handle('export-layout', async (_e, layout) => {
+  const { filePath, canceled } = await dialog.showSaveDialog(mainWindow, {
+    title: 'Bon-Layout exportieren',
+    defaultPath: 'bon-layout.json',
+    filters: [{ name: 'JSON', extensions: ['json'] }],
+  })
+  if (canceled || !filePath) return { success: false, canceled: true }
+  try {
+    fs.writeFileSync(filePath, JSON.stringify({ bonLayout: layout }, null, 2), 'utf8')
+    return { success: true }
+  } catch (e) {
+    return { success: false, error: e.message }
+  }
+})
+
+// Layout importieren
+ipcMain.handle('import-layout', async () => {
+  const { filePaths, canceled } = await dialog.showOpenDialog(mainWindow, {
+    title: 'Bon-Layout importieren',
+    filters: [{ name: 'JSON', extensions: ['json'] }],
+    properties: ['openFile'],
+  })
+  if (canceled || !filePaths.length) return { success: false, canceled: true }
+  try {
+    const raw = fs.readFileSync(filePaths[0], 'utf8')
+    const data = JSON.parse(raw)
+    const layout = Array.isArray(data) ? data : data.bonLayout
+    if (!Array.isArray(layout)) throw new Error('Ungültiges Layout-Format')
+    return { success: true, layout }
+  } catch (e) {
     return { success: false, error: e.message }
   }
 })

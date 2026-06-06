@@ -2,7 +2,7 @@ import { useState, useCallback } from 'react'
 import {
   Layout, GripVertical, Trash2, ChevronUp, ChevronDown,
   Plus, RotateCcw, Save, AlignLeft, AlignCenter, AlignRight,
-  Type, Minus, Square, List, Hash, Eye,
+  Type, Minus, Square, List, Hash, Eye, Download, Upload,
 } from 'lucide-react'
 
 // ─── Konstanten ───────────────────────────────────────────────────────────────
@@ -583,8 +583,9 @@ export default function LayoutEditor({ config, onSave }) {
     }
     return DEFAULT_LAYOUT
   })
-  const [saving, setSaving] = useState(false)
-  const [saved, setSaved]   = useState(false)
+  const [saving, setSaving]       = useState(false)
+  const [saved, setSaved]         = useState(false)
+  const [importError, setImportError] = useState('')
 
   const barName = config?.barName || 'BAR'
 
@@ -627,6 +628,22 @@ export default function LayoutEditor({ config, onSave }) {
     setTimeout(() => setSaved(false), 3000)
   }
 
+  async function handleExport() {
+    await window.electron.exportLayout(layout)
+  }
+
+  async function handleImport() {
+    setImportError('')
+    const result = await window.electron.importLayout()
+    if (result.canceled) return
+    if (!result.success) {
+      setImportError(result.error || 'Fehler beim Importieren')
+      return
+    }
+    setLayout(result.layout)
+    setSaved(false)
+  }
+
   return (
     <div className="settings-panel">
       {/* Header */}
@@ -635,7 +652,13 @@ export default function LayoutEditor({ config, onSave }) {
           <div className="page-title">Bon-Layout</div>
           <div className="page-subtitle">Anordnung und Inhalt des gedruckten Bons anpassen</div>
         </div>
-        <div style={{ display: 'flex', gap: 8, flexShrink: 0 }}>
+        <div style={{ display: 'flex', gap: 8, flexShrink: 0, flexWrap: 'wrap' }}>
+          <button className="btn btn-secondary" style={{ gap: 6 }} onClick={handleImport} title="Layout aus JSON-Datei laden">
+            <Upload size={13} /> Importieren
+          </button>
+          <button className="btn btn-secondary" style={{ gap: 6 }} onClick={handleExport} title="Layout als JSON-Datei speichern">
+            <Download size={13} /> Exportieren
+          </button>
           <button className="btn btn-secondary" style={{ gap: 6 }} onClick={resetToDefault}>
             <RotateCcw size={13} /> Standard
           </button>
@@ -649,6 +672,12 @@ export default function LayoutEditor({ config, onSave }) {
           </button>
         </div>
       </div>
+
+      {importError && (
+        <div className="alert error" style={{ marginBottom: 12 }}>
+          <span style={{ fontWeight: 600 }}>Import fehlgeschlagen:</span> {importError}
+        </div>
+      )}
 
       {/* Body: 2-column layout */}
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 360px', gap: 20, alignItems: 'start' }}>
