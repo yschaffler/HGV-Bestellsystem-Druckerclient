@@ -235,21 +235,96 @@ ipcMain.handle('get-com-ports', async () => {
 ipcMain.handle('print-order', async (_e, { order, config }) => {
   const {
     buildPrintHtml,
+    buildPrintHtmlFromLayout,
+    buildEscPosBufferFromLayout,
     printToWindowsPrinter,
     printToWindowsPrinterEscPos,
     printToComPort,
+    DEFAULT_LAYOUT,
   } = require('./printer')
+
+  const layout = Array.isArray(config.bonLayout) && config.bonLayout.length > 0
+    ? config.bonLayout
+    : DEFAULT_LAYOUT
 
   try {
     if (config.printerType === 'com') {
-      // Alter serieller Drucker – ESC/POS direkt über COM-Port
       await printToComPort(config.comPort, order)
     } else if (config.printerType === 'escpos') {
-      // Windows-Drucker – ESC/POS als RAW-Job (schneller, kein HTML-Rendering)
-      await printToWindowsPrinterEscPos(config.printerName, order, config.barName)
+      const { execFile } = require('child_process')
+      const fs   = require('fs')
+      const os   = require('os')
+      const path = require('path')
+
+      const buffer  = buildEscPosBufferFromLayout(order, config.barName, layout)
+      const ts      = Date.now()
+      const tmpBin  = path.join(os.tmpdir(), `hgv_escpos_${ts}.bin`)
+      const tmpPs   = path.join(os.tmpdir(), `hgv_escpos_${ts}.ps1`)
+
+      fs.writeFileSync(tmpBin, buffer)
+
+      const safePrinter = config.printerName.replace(/'/g, "''")
+      const safeBin     = tmpBin.replace(/\\/g, '\\\\')
+
+      const ps = `
+$ErrorActionPreference = 'Stop'
+$bytes = [System.IO.File]::ReadAllBytes('${safeBin}')
+Add-Type -Namespace HgvPrint -Name WinSpool -MemberDefinition @'
+  [DllImport("winspool.drv", CharSet=CharSet.Ansi)]
+  public static extern bool OpenPrinter(string name, out IntPtr handle, IntPtr def);
+  [DllImport("winspool.drv")]
+  public static extern bool ClosePrinter(IntPtr handle);
+  [DllImport("winspool.drv", CharSet=CharSet.Ansi)]
+  public static extern int StartDocPrinter(IntPtr h, int lvl, ref DOCINFO di);
+  [DllImport("winspool.drv")]
+  public static extern bool EndDocPrinter(IntPtr h);
+  [DllImport("winspool.drv")]
+  public static extern bool StartPagePrinter(IntPtr h);
+  [DllImport("winspool.drv")]
+  public static extern bool EndPagePrinter(IntPtr h);
+  [DllImport("winspool.drv")]
+  public static extern bool WritePrinter(IntPtr h, IntPtr buf, int len, out int written);
+  [StructLayout(LayoutKind.Sequential, CharSet=CharSet.Ansi)]
+  public struct DOCINFO {
+    [MarshalAs(UnmanagedType.LPStr)] public string pDocName;
+    [MarshalAs(UnmanagedType.LPStr)] public string pOutputFile;
+    [MarshalAs(UnmanagedType.LPStr)] public string pDataType;
+  }
+'@
+$h = [IntPtr]::Zero
+if (-not [HgvPrint.WinSpool]::OpenPrinter('${safePrinter}', [ref]$h, [IntPtr]::Zero)) {
+  throw "Drucker '${safePrinter}' konnte nicht geoeffnet werden."
+}
+$di = New-Object HgvPrint.WinSpool+DOCINFO
+$di.pDocName  = 'HGV Bon'
+$di.pDataType = 'RAW'
+[HgvPrint.WinSpool]::StartDocPrinter($h, 1, [ref]$di) | Out-Null
+[HgvPrint.WinSpool]::StartPagePrinter($h) | Out-Null
+$gc = [Runtime.InteropServices.GCHandle]::Alloc($bytes, 'Pinned')
+$written = 0
+[HgvPrint.WinSpool]::WritePrinter($h, $gc.AddrOfPinnedObject(), $bytes.Length, [ref]$written) | Out-Null
+$gc.Free()
+[HgvPrint.WinSpool]::EndPagePrinter($h) | Out-Null
+[HgvPrint.WinSpool]::EndDocPrinter($h) | Out-Null
+[HgvPrint.WinSpool]::ClosePrinter($h) | Out-Null
+`
+      fs.writeFileSync(tmpPs, ps, 'utf8')
+
+      await new Promise((resolve, reject) => {
+        execFile(
+          'powershell.exe',
+          ['-NonInteractive', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', tmpPs],
+          { timeout: 20000 },
+          (err, _stdout, stderr) => {
+            try { fs.unlinkSync(tmpBin) } catch (_) {}
+            try { fs.unlinkSync(tmpPs)  } catch (_) {}
+            if (err) reject(new Error(stderr?.trim() || err.message))
+            else resolve()
+          }
+        )
+      })
     } else {
-      // Windows-Drucker – HTML über Electron BrowserWindow (Standard)
-      const html = buildPrintHtml(order, config.barName)
+      const html = buildPrintHtmlFromLayout(order, config.barName, layout)
       await printToWindowsPrinter(printWindow, config.printerName, html)
     }
     return { success: true }
@@ -262,10 +337,11 @@ ipcMain.handle('print-order', async (_e, { order, config }) => {
 // Test-Druck
 ipcMain.handle('test-print', async (_e, config) => {
   const {
-    buildPrintHtml,
+    buildPrintHtmlFromLayout,
+    buildEscPosBufferFromLayout,
     printToWindowsPrinter,
-    printToWindowsPrinterEscPos,
     printToComPort,
+    DEFAULT_LAYOUT,
   } = require('./printer')
 
   const testOrder = {
@@ -281,13 +357,88 @@ ipcMain.handle('test-print', async (_e, config) => {
     note: 'HGV Bestellsystem – Druckerclient',
   }
 
+  const layout = Array.isArray(config.bonLayout) && config.bonLayout.length > 0
+    ? config.bonLayout
+    : DEFAULT_LAYOUT
+
   try {
     if (config.printerType === 'com') {
       await printToComPort(config.comPort, testOrder)
     } else if (config.printerType === 'escpos') {
-      await printToWindowsPrinterEscPos(config.printerName, testOrder, config.barName)
+      const { execFile } = require('child_process')
+      const fs   = require('fs')
+      const os   = require('os')
+      const path = require('path')
+
+      const buffer  = buildEscPosBufferFromLayout(testOrder, config.barName, layout)
+      const ts      = Date.now()
+      const tmpBin  = path.join(os.tmpdir(), `hgv_escpos_${ts}.bin`)
+      const tmpPs   = path.join(os.tmpdir(), `hgv_escpos_${ts}.ps1`)
+
+      fs.writeFileSync(tmpBin, buffer)
+
+      const safePrinter = config.printerName.replace(/'/g, "''")
+      const safeBin     = tmpBin.replace(/\\/g, '\\\\')
+
+      const ps = `
+$ErrorActionPreference = 'Stop'
+$bytes = [System.IO.File]::ReadAllBytes('${safeBin}')
+Add-Type -Namespace HgvPrint -Name WinSpool -MemberDefinition @'
+  [DllImport("winspool.drv", CharSet=CharSet.Ansi)]
+  public static extern bool OpenPrinter(string name, out IntPtr handle, IntPtr def);
+  [DllImport("winspool.drv")]
+  public static extern bool ClosePrinter(IntPtr handle);
+  [DllImport("winspool.drv", CharSet=CharSet.Ansi)]
+  public static extern int StartDocPrinter(IntPtr h, int lvl, ref DOCINFO di);
+  [DllImport("winspool.drv")]
+  public static extern bool EndDocPrinter(IntPtr h);
+  [DllImport("winspool.drv")]
+  public static extern bool StartPagePrinter(IntPtr h);
+  [DllImport("winspool.drv")]
+  public static extern bool EndPagePrinter(IntPtr h);
+  [DllImport("winspool.drv")]
+  public static extern bool WritePrinter(IntPtr h, IntPtr buf, int len, out int written);
+  [StructLayout(LayoutKind.Sequential, CharSet=CharSet.Ansi)]
+  public struct DOCINFO {
+    [MarshalAs(UnmanagedType.LPStr)] public string pDocName;
+    [MarshalAs(UnmanagedType.LPStr)] public string pOutputFile;
+    [MarshalAs(UnmanagedType.LPStr)] public string pDataType;
+  }
+'@
+$h = [IntPtr]::Zero
+if (-not [HgvPrint.WinSpool]::OpenPrinter('${safePrinter}', [ref]$h, [IntPtr]::Zero)) {
+  throw "Drucker '${safePrinter}' konnte nicht geoeffnet werden."
+}
+$di = New-Object HgvPrint.WinSpool+DOCINFO
+$di.pDocName  = 'HGV Bon'
+$di.pDataType = 'RAW'
+[HgvPrint.WinSpool]::StartDocPrinter($h, 1, [ref]$di) | Out-Null
+[HgvPrint.WinSpool]::StartPagePrinter($h) | Out-Null
+$gc = [Runtime.InteropServices.GCHandle]::Alloc($bytes, 'Pinned')
+$written = 0
+[HgvPrint.WinSpool]::WritePrinter($h, $gc.AddrOfPinnedObject(), $bytes.Length, [ref]$written) | Out-Null
+$gc.Free()
+[HgvPrint.WinSpool]::EndPagePrinter($h) | Out-Null
+[HgvPrint.WinSpool]::EndDocPrinter($h) | Out-Null
+[HgvPrint.WinSpool]::ClosePrinter($h) | Out-Null
+`
+      fs.writeFileSync(tmpPs, ps, 'utf8')
+
+      await new Promise((resolve, reject) => {
+        execFile(
+          'powershell.exe',
+          ['-NonInteractive', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', tmpPs],
+          { timeout: 20000 },
+          (err, _stdout, stderr) => {
+            try { fs.unlinkSync(tmpBin) } catch (_) {}
+            try { fs.unlinkSync(tmpPs)  } catch (_) {}
+            if (err) reject(new Error(stderr?.trim() || err.message))
+            else resolve()
+          }
+        )
+      })
     } else {
-      const html = buildPrintHtml(testOrder, config.barName)
+      const html = buildPrintHtmlFromLayout(testOrder, config.barName, layout)
       await printToWindowsPrinter(printWindow, config.printerName, html)
     }
     return { success: true }

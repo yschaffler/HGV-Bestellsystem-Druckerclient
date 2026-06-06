@@ -1,7 +1,8 @@
 import { useState, useEffect, useCallback } from 'react'
-import { ClipboardList, Settings, Printer, Wifi, WifiOff, Loader2, Clock, PrinterX } from 'lucide-react'
+import { ClipboardList, Settings, Printer, Wifi, WifiOff, Loader2, Clock, PrinterX, Layout } from 'lucide-react'
 import useWebSocket from '../hooks/useWebSocket.js'
 import SetupScreen from './SetupScreen.jsx'
+import LayoutEditor from './LayoutEditor.jsx'
 
 const MAX_LOG = 100
 
@@ -196,6 +197,13 @@ export default function Dashboard({ config, initialPage, onSaveConfig }) {
             Bestellungen
           </button>
           <button
+            className={`sidebar-item ${activePage === 'layout' ? 'active' : ''}`}
+            onClick={() => setActivePage('layout')}
+          >
+            <Layout size={16} />
+            Bon-Layout
+          </button>
+          <button
             className={`sidebar-item ${activePage === 'settings' ? 'active' : ''}`}
             onClick={() => setActivePage('settings')}
           >
@@ -232,7 +240,7 @@ export default function Dashboard({ config, initialPage, onSaveConfig }) {
       </aside>
 
       {/* Hauptbereich */}
-      <main className={`main-content${activePage === 'settings' ? ' main-content--settings' : ''}`}>
+      <main className={`main-content${(activePage === 'settings' || activePage === 'layout') ? ' main-content--settings' : ''}`}>
 
         {/* ── Bestellungen ── */}
         {activePage === 'orders' && configured && (
@@ -313,6 +321,17 @@ export default function Dashboard({ config, initialPage, onSaveConfig }) {
               )}
             </div>
           </>
+        )}
+
+        {/* ── Bon-Layout ── */}
+        {activePage === 'layout' && (
+          <LayoutEditor
+            key="layout"
+            config={config}
+            onSave={async (newConfig) => {
+              await onSaveConfig(newConfig)
+            }}
+          />
         )}
 
         {/* ── Einstellungen ── */}

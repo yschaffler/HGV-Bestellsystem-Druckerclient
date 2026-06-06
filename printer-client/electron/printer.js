@@ -639,11 +639,352 @@ async function printToComPort(portPath, order) {
   await new Promise((resolve) => port.close(resolve))
 }
 
+// ─── Layout-Rendering ─────────────────────────────────────────────────────────
+
+/**
+ * Standard-Layout – spiegelt das bisherige ESC/POS-Format exakt wider.
+ * Wird genutzt wenn kein bonLayout in der Config hinterlegt ist.
+ */
+const DEFAULT_LAYOUT = [
+  {
+    id: 'header',
+    type: 'compound',
+    bold: true,
+    size: 'large',
+    cols: [
+      { field: 'table',    prefix: 'Tisch' },
+      { field: 'bar_name', prefix: '' },
+      { field: 'time',     prefix: '' },
+    ],
+  },
+  { id: 'div1', type: 'divider', char: '=' },
+  { id: 'items', type: 'items' },
+  { id: 'div2', type: 'divider', char: '=' },
+  { id: 'total', type: 'total', bold: true },
+  { id: 'div3', type: 'divider', char: '-' },
+  {
+    id: 'footer',
+    type: 'compound',
+    bold: false,
+    size: 'normal',
+    cols: [
+      { field: 'waiter',   prefix: '' },
+      { field: 'order_id', prefix: '#' },
+      { field: 'date',     prefix: '' },
+    ],
+  },
+]
+
+function resolveField(field, order, barName, now) {
+  switch (field) {
+    case 'table':    return order.table != null ? String(order.table) : '-'
+    case 'waiter':   return order.waiter_name || '-'
+    case 'order_id': return String(order.order_id)
+    case 'date':     return now.toLocaleDateString('de-DE')
+    case 'time':     return formatTime(now)
+    case 'bar_name': return String(barName || 'HGV').toUpperCase()
+    case 'note':     return order.note || ''
+    default:         return ''
+  }
+}
+
+/**
+ * Baut einen ESC/POS-Buffer aus einem konfigurierbaren Layout-Array.
+ */
+function buildEscPosBufferFromLayout(order, barName, layout) {
+  const now    = new Date()
+  const storno = isStorno(order)
+  const total  = order.items.reduce((sum, i) => sum + i.price * i.quantity, 0)
+  const W      = 42
+
+  const CMD = {
+    INIT:        Buffer.from([ESC, 0x40]),
+    CHARSET_858: Buffer.from([ESC, 0x74, 0x10]),
+    ALIGN_LEFT:  Buffer.from([ESC, 0x61, 0x00]),
+    ALIGN_CENTER:Buffer.from([ESC, 0x61, 0x01]),
+    ALIGN_RIGHT: Buffer.from([ESC, 0x61, 0x02]),
+    BOLD_ON:     Buffer.from([ESC, 0x45, 0x01]),
+    BOLD_OFF:    Buffer.from([ESC, 0x45, 0x00]),
+    DBL_H:       Buffer.from([GS,  0x21, 0x01]),
+    NORMAL:      Buffer.from([GS,  0x21, 0x00]),
+    CUT:         Buffer.from([GS,  0x56, 0x42, 0x05]),
+    LF:          Buffer.from([0x0a]),
+  }
+
+  function ln(text = '') {
+    return Buffer.from(String(text) + '\n', 'latin1')
+  }
+
+  function alignedLine(text, align, width = W) {
+    text = String(text)
+    if (align === 'center') {
+      const spaces = Math.max(0, Math.floor((width - text.length) / 2))
+      return Buffer.from(' '.repeat(spaces) + text + '\n', 'latin1')
+    }
+    if (align === 'right') {
+      const spaces = Math.max(0, width - text.length)
+      return Buffer.from(' '.repeat(spaces) + text + '\n', 'latin1')
+    }
+    return Buffer.from(text + '\n', 'latin1')
+  }
+
+  function padBuf(left, right, width = W) {
+    left  = String(left); right = String(right)
+    const spaces = Math.max(1, width - left.length - right.length)
+    return Buffer.from(left + ' '.repeat(spaces) + right + '\n', 'latin1')
+  }
+
+  function threeColBuf(a, b, c, width = W) {
+    a = String(a); b = String(b); c = String(c)
+    const spare = Math.max(2, width - a.length - b.length - c.length)
+    const g1 = Math.ceil(spare / 2)
+    const g2 = spare - g1
+    return Buffer.from(a + ' '.repeat(g1) + b + ' '.repeat(g2) + c + '\n', 'latin1')
+  }
+
+  function sepBuf(ch = '=') {
+    return Buffer.from(ch.repeat(W) + '\n', 'latin1')
+  }
+
+  const chunks = [CMD.INIT, CMD.CHARSET_858, CMD.ALIGN_LEFT]
+
+  const hasNoteField = layout.some(el => el.type === 'field' && el.field === 'note')
+
+  for (const el of layout) {
+    switch (el.type) {
+
+      case 'compound': {
+        const texts = (el.cols || []).map(c => {
+          const val = resolveField(c.field, order, barName, now)
+          return c.prefix ? `${c.prefix} ${val}` : val
+        })
+        if (el.bold) chunks.push(CMD.BOLD_ON)
+        if (el.size === 'large') chunks.push(CMD.DBL_H)
+
+        if (texts.length >= 3)      chunks.push(threeColBuf(texts[0], texts[1], texts[2]))
+        else if (texts.length === 2) chunks.push(padBuf(texts[0], texts[1]))
+        else if (texts.length === 1) chunks.push(alignedLine(texts[0], el.align || 'left'))
+
+        if (el.size === 'large') chunks.push(CMD.NORMAL)
+        if (el.bold) chunks.push(CMD.BOLD_OFF)
+        break
+      }
+
+      case 'field': {
+        const val = resolveField(el.field, order, barName, now)
+        if (!val || val === '-') { if (['note', 'waiter'].includes(el.field)) break }
+        const text = el.label ? `${el.label}: ${val}` : val
+        if (el.bold) chunks.push(CMD.BOLD_ON)
+        if (el.size === 'large') chunks.push(CMD.DBL_H)
+        chunks.push(alignedLine(text, el.align || 'left'))
+        if (el.size === 'large') chunks.push(CMD.NORMAL)
+        if (el.bold) chunks.push(CMD.BOLD_OFF)
+        break
+      }
+
+      case 'text': {
+        if (!el.content) break
+        if (el.bold) chunks.push(CMD.BOLD_ON)
+        if (el.size === 'large') chunks.push(CMD.DBL_H)
+        chunks.push(alignedLine(el.content, el.align || 'left'))
+        if (el.size === 'large') chunks.push(CMD.NORMAL)
+        if (el.bold) chunks.push(CMD.BOLD_OFF)
+        break
+      }
+
+      case 'divider':
+        chunks.push(sepBuf(el.char && el.char.trim() ? el.char[0] : '='))
+        break
+
+      case 'spacer':
+        chunks.push(CMD.LF)
+        break
+
+      case 'items': {
+        if (storno) {
+          chunks.push(CMD.LF, CMD.BOLD_ON, ln('*** STORNO ***'), CMD.BOLD_OFF)
+        }
+        chunks.push(CMD.LF)
+        for (const item of order.items) {
+          const qty   = storno ? `-${item.quantity}x` : `${item.quantity}x`
+          const price = storno
+            ? `-${formatPrice(item.price * item.quantity)}`
+            : formatPrice(item.price * item.quantity)
+          const nameMax = W - qty.length - 3 - 1 - price.length
+          const name    = String(item.name).substring(0, nameMax).padEnd(nameMax)
+          chunks.push(
+            CMD.DBL_H,
+            Buffer.from(`${qty}   ${name} ${price}\n`, 'latin1'),
+            CMD.NORMAL,
+          )
+          if (item.note) chunks.push(Buffer.from(`     -> ${item.note}\n`, 'latin1'))
+          chunks.push(CMD.LF)
+        }
+        break
+      }
+
+      case 'total': {
+        const totalLabel = storno ? 'STORNO' : 'GESAMT'
+        const totalValue = storno ? `-${formatPrice(total)}` : formatPrice(total)
+        if (el.bold) chunks.push(CMD.BOLD_ON)
+        chunks.push(padBuf(totalLabel, totalValue))
+        if (el.bold) chunks.push(CMD.BOLD_OFF)
+        // Bestellnotiz nach Gesamt ausgeben, sofern kein eigenes Notiz-Feld im Layout
+        if (order.note && !hasNoteField) {
+          chunks.push(CMD.LF, ln(`Notiz: ${order.note}`))
+        }
+        break
+      }
+
+      default: break
+    }
+  }
+
+  chunks.push(Buffer.from('\n\n\n'), CMD.CUT)
+  return Buffer.concat(chunks)
+}
+
+/**
+ * Baut HTML aus einem konfigurierbaren Layout-Array (für Windows-Druckmodus).
+ */
+function buildPrintHtmlFromLayout(order, barName, layout) {
+  const now    = new Date()
+  const storno = isStorno(order)
+  const total  = order.items.reduce((sum, i) => sum + i.price * i.quantity, 0)
+
+  function esc(str) {
+    return String(str)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+  }
+
+  function resolveHtml(field) {
+    return esc(resolveField(field, order, barName, now))
+  }
+
+  function alignStyle(align) {
+    if (align === 'center') return 'text-align:center'
+    if (align === 'right')  return 'text-align:right'
+    return 'text-align:left'
+  }
+
+  const hasNoteField = layout.some(el => el.type === 'field' && el.field === 'note')
+
+  const sections = layout.map(el => {
+    switch (el.type) {
+
+      case 'compound': {
+        const texts = (el.cols || []).map(c => {
+          const val = resolveHtml(c.field)
+          return c.prefix ? `${esc(c.prefix)} ${val}` : val
+        })
+        const fs   = el.size === 'large' ? '16px' : '13px'
+        const fw   = el.bold ? 'bold' : 'normal'
+        if (texts.length >= 3) {
+          return `<div style="display:flex;justify-content:space-between;font-size:${fs};font-weight:${fw};padding:2px 0">
+            <span>${texts[0]}</span><span>${texts[1]}</span><span>${texts[2]}</span>
+          </div>`
+        }
+        if (texts.length === 2) {
+          return `<div style="display:flex;justify-content:space-between;font-size:${fs};font-weight:${fw};padding:2px 0">
+            <span>${texts[0]}</span><span>${texts[1]}</span>
+          </div>`
+        }
+        const align = el.align || 'left'
+        return `<div style="${alignStyle(align)};font-size:${fs};font-weight:${fw};padding:2px 0">${texts[0] || ''}</div>`
+      }
+
+      case 'field': {
+        const val = resolveHtml(el.field)
+        if (!val || val === '-') { if (['note', 'waiter'].includes(el.field)) return '' }
+        const text = el.label ? `${esc(el.label)}: ${val}` : val
+        const fs   = el.size === 'large' ? '15px' : '12px'
+        const fw   = el.bold ? 'bold' : 'normal'
+        return `<div style="${alignStyle(el.align)};font-size:${fs};font-weight:${fw};padding:2px 0">${text}</div>`
+      }
+
+      case 'text': {
+        if (!el.content) return ''
+        const fs = el.size === 'large' ? '15px' : '12px'
+        const fw = el.bold ? 'bold' : 'normal'
+        return `<div style="${alignStyle(el.align)};font-size:${fs};font-weight:${fw};padding:2px 0">${esc(el.content)}</div>`
+      }
+
+      case 'divider': {
+        const ch = el.char && el.char.trim() ? el.char[0] : '='
+        return `<div style="border-top:${ch === '=' ? '2px' : '1px'} ${ch === ' ' ? 'dashed' : 'solid'} #000;margin:4px 0"></div>`
+      }
+
+      case 'spacer':
+        return `<div style="height:6px"></div>`
+
+      case 'items': {
+        const rows = order.items.map(item => `
+          <tr class="${storno ? 'storno-row' : ''}">
+            <td class="qty">${item.quantity}x</td>
+            <td class="name">${esc(item.name)}</td>
+            <td class="price">${storno ? '–' : ''}${esc(formatPrice(item.price * item.quantity))}</td>
+          </tr>
+          ${item.note ? `<tr class="note-row"><td></td><td colspan="2" class="note">↳ ${esc(item.note)}</td></tr>` : ''}
+        `).join('')
+
+        const stornoHtml = storno
+          ? `<div style="text-align:center;font-weight:bold;font-size:15px;letter-spacing:2px;padding:3mm 0;border-bottom:1px dashed #000">*** STORNO ***</div>`
+          : ''
+
+        return `${stornoHtml}<div class="items"><table>${rows}</table></div>`
+      }
+
+      case 'total': {
+        const label = storno ? 'STORNO' : 'GESAMT'
+        const value = `${storno ? '–' : ''}${esc(formatPrice(total))}`
+        const fw    = el.bold ? 'bold' : 'normal'
+        const noteHtml = (order.note && !hasNoteField)
+          ? `<div style="font-size:12px;padding:2mm 0"><strong>Notiz:</strong> ${esc(order.note)}</div>`
+          : ''
+        return `
+          <div style="display:flex;justify-content:space-between;font-weight:${fw};font-size:16px;padding:3mm 0">
+            <span>${label}</span><span>${value}</span>
+          </div>
+          ${noteHtml}`
+      }
+
+      default: return ''
+    }
+  }).join('\n')
+
+  return `<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { font-family:'Courier New',Courier,monospace; font-size:13px; line-height:1.45; width:72mm; color:#000; background:#fff; padding:4mm 3mm; }
+  table { width:100%; border-collapse:collapse; }
+  td { padding:2px 0; vertical-align:top; }
+  td.qty { width:30px; white-space:nowrap; font-weight:bold; }
+  td.name { padding-left:3px; word-break:break-word; }
+  td.price { text-align:right; white-space:nowrap; }
+  .storno-row td { text-decoration:line-through; color:#555; }
+  .note-row .note { font-size:11px; font-style:italic; color:#444; padding:0 0 3px 4px; }
+  .items { padding:2mm 0; }
+  @media print { html,body { width:auto; } }
+</style>
+</head>
+<body>${sections}</body>
+</html>`
+}
+
 module.exports = {
   buildPrintHtml,
+  buildPrintHtmlFromLayout,
+  buildEscPosBuffer,
+  buildEscPosBufferFromLayout,
   printToWindowsPrinter,
   printToWindowsPrinterEscPos,
   printToComPort,
   replaceUmlauts,
   formatPrice,
+  DEFAULT_LAYOUT,
 }
