@@ -7,7 +7,6 @@
  */
 
 // ─── Umlaut-Ersatz für ältere Drucker ohne UTF-8 ─────────────────────────────
-
 function replaceUmlauts(text) {
   return String(text)
     .replace(/ä/g, 'ae')
@@ -19,6 +18,36 @@ function replaceUmlauts(text) {
     .replace(/ß/g, 'ss')
     .replace(/€/g, 'EUR')
 }
+
+// ─── Tisch-Nummern-Formatierung ──────────────────────────────────────────────
+const fs = require("fs")
+const path = require("path")
+
+let tableGuestMap = {}
+
+try {
+    tableGuestMap = JSON.parse(
+        fs.readFileSync(
+            path.join(__dirname, "tableGuestMap.json"),
+            "utf8"
+        )
+    )
+} catch (err) {
+    console.warn("Keine tableGuestMap gefunden.")
+}
+
+function formatTable(table) {
+  if (table == null) return "-"
+
+  const guestNumber = tableGuestMap[String(table)]
+
+  if (guestNumber) {
+      return `${table} (${guestNumber})`
+  }
+
+  return String(table)
+}
+
 
 // ─── Preis-Formatierung ───────────────────────────────────────────────────────
 
@@ -208,7 +237,7 @@ function buildPrintHtml(order, barName = '') {
 
   <div class="order-info">
     <span>Bon #${order.order_id}</span>
-    <span>Tisch ${order.table ?? '–'}</span>
+    <span>Tisch ${formatTable(order.table)}</span>
   </div>
 
   <div class="items">
@@ -334,8 +363,8 @@ function buildEscPosBuffer(order, barName = '') {
   // ── Header: Tisch | Bar | Zeit – alle drei auf einer Zeile ────────────────
   const venue = String(barName || 'HGV').toUpperCase()
   const header = storno
-    ? threeCol(`Tisch ${order.table ?? '-'}`, venue, formatTime(now))
-    : threeCol(`Tisch ${order.table ?? '-'}`, venue, formatTime(now))
+    ? threeCol(`Tisch ${formatTable(order.table)}`, venue, formatTime(now))
+    : threeCol(`Tisch ${formatTable(order.table)}`, venue, formatTime(now))
 
   const chunks = [
     CMD.INIT,
@@ -677,7 +706,7 @@ const DEFAULT_LAYOUT = [
 
 function resolveField(field, order, barName, now) {
   switch (field) {
-    case 'table':    return order.table != null ? String(order.table) : '-'
+    case 'table':    return formatTable(order.table)
     case 'waiter':   return order.waiter_name || '-'
     case 'order_id': return String(order.order_id)
     case 'date':     return now.toLocaleDateString('de-DE')
